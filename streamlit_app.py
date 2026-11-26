@@ -64,16 +64,16 @@ def extrair_pdf(arquivo):
             linha = linhas[i]
 
             # Cada cabeçalho de fornecedor atualiza o contexto da nota.
-            m_for = re.search(r"Fornecedor\\s*:\\s*(.*?)(?=\\s+Vencimento\\s*:|$)", linha, re.I)
+            m_for = re.search(r"Fornecedor\s*:\s*(.*?)(?=\s+Vencimento\s*:|$)", linha, re.I)
             if m_for:
                 fornecedor_atual = m_for.group(1).strip()
 
             # Número pode aparecer na mesma linha do rótulo ou nas linhas seguintes.
-            if re.search(r"N[º°o]\\s*da\\s*Nota\\s*:", linha, re.I):
+            if re.search(r"N[º°o]\s*da\s*Nota\s*:", linha, re.I):
                 bloco = " ".join(linhas[i:i+3])
-                m_nota = re.search(r"N[º°o]\\s*da\\s*Nota\\s*:\\s*(?:\\s*)?(\\d{3,}(?:/\\d{1,3})?)", bloco, re.I)
+                m_nota = re.search(r"N[º°o]\s*da\s*Nota\s*:\s*(?:\s*)?(\d{3,}(?:/\d{1,3})?)", bloco, re.I)
                 if not m_nota:
-                    m_nota = re.search(r"(\\d{3,}/\\d{1,3})", bloco)
+                    m_nota = re.search(r"(\d{3,}/\d{1,3})", bloco)
                 if m_nota:
                     nota_atual = m_nota.group(1)
                     chave_atual = numeros(nota_atual)
@@ -88,12 +88,12 @@ def extrair_pdf(arquivo):
                 desc = ""
                 qty = None
                 if i + 1 < len(linhas):
-                    desc = re.sub(r"^(Estoque:|Centro de Custo:)\\s*", "", linhas[i+1], flags=re.I).strip()
+                    desc = re.sub(r"^(Estoque:|Centro de Custo:)\s*", "", linhas[i+1], flags=re.I).strip()
 
                 # A quantidade de destino costuma estar na linha seguinte ao nome,
                 # antes da unidade (CX, KG etc.). Procura somente dentro de 3 linhas.
                 for j in range(i + 2, min(i + 5, len(linhas))):
-                    m_qty = re.match(r"^(-?\\d+[.,]\\d+)\\s*(?:[A-Za-z]{1,6})?$", linhas[j])
+                    m_qty = re.match(r"^(-?\d+[.,]\d+)\s*(?:[A-Za-z]{1,6})?$", linhas[j])
                     if m_qty:
                         qty = quantidade_pt(m_qty.group(1))
                         break
