@@ -336,32 +336,13 @@ if "resultados" in st.session_state:
                     "Documento não localizado no relatório PDF enviado."
                 )
 
-            # Controles individuais
+            # Único controle individual: checkbox de confirmação
             chave = f"conferencia_{i}"
 
-            opcoes = [
-                "Pendente",
-                "Confirmado",
-                "Corrigir",
-                "Compra confirmada",
-                "Verificar"
-            ]
-
-            estado_atual = st.session_state.get(chave, "Pendente")
-
-            st.selectbox(
-                "Resultado da conferência",
-                opcoes,
-                index=opcoes.index(estado_atual),
+            st.checkbox(
+                "Confirmar",
                 key=chave
             )
-
-            observacao = st.text_input(
-                "Observação / correção",
-                key=f"obs_{i}",
-                placeholder="Anote aqui caso precise corrigir..."
-            )
-
 
 # =========================================================
 # RESUMO
@@ -375,31 +356,13 @@ if "resultados" in st.session_state:
     resultados = st.session_state["resultados"]
 
     total = len(resultados)
-    confirmados = 0
-    corrigir = 0
-    pendentes = 0
+    confirmados = sum(
+        bool(st.session_state.get(f"conferencia_{i}", False))
+        for i in range(total)
+    )
 
-    for i in range(total):
-
-        estado = st.session_state.get(
-            f"conferencia_{i}",
-            "Pendente"
-        )
-
-        if estado in ["Confirmado", "Compra confirmada"]:
-            confirmados += 1
-
-        elif estado == "Corrigir":
-            corrigir += 1
-
-        else:
-            pendentes += 1
-
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric("Confirmados", confirmados)
-    c2.metric("Corrigir", corrigir)
-    c3.metric("Pendentes", pendentes)
+    st.metric("Confirmados", confirmados)
+    st.metric("Ainda não confirmados", total - confirmados)
 
     # =====================================================
     # EXPORTAÇÃO DO RESUMO
@@ -413,14 +376,7 @@ if "resultados" in st.session_state:
             "Ordem": i+1,
             "Documento": resultado["documento"],
             "Status automático": resultado["status"],
-            "Conferência": st.session_state.get(
-                f"conferencia_{i}",
-                "Pendente"
-            ),
-            "Observação": st.session_state.get(
-                f"obs_{i}",
-                ""
-            )
+            "Confirmado": "SIM" if st.session_state.get(f"conferencia_{i}", False) else "NÃO"
         })
 
     df_resultado = pd.DataFrame(linhas_resumo)
@@ -451,8 +407,7 @@ if "resultados" in st.session_state:
         [
             f"{linha['Ordem']}. Documento {linha['Documento']} | "
             f"{linha['Status automático']} | "
-            f"{linha['Conferência']} | "
-            f"{linha['Observação']}"
+            f"Confirmado: {linha['Confirmado']}"
             for linha in linhas_resumo
         ]
     )
