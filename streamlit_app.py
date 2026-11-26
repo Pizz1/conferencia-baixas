@@ -1,430 +1,130 @@
-import streamlit as st
-import pandas as pd
-import fitz
-import re
-import unicodedata
-from difflib import SequenceMatcher
-from io import BytesIO
 
-# =========================================================
-# CONFIGURAÇÃO
-# =========================================================
+        if "Nº da Nota" in linha or "N° da Nota" in linha:
+            candidatos = re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", linha)
+            # O número da nota frequentemente está na linha seguinte e não na linha do rótulo.
+            if i + 1 < len(linhas):
+                candidatos += re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", linhas[i + 1])
+            com_barra = [c for c in candidatos if "/" in c]
+            if com_barra:
+                nota = com_barra[0]
+            elif candidatos:
+                nota = candidatos[0]
+            if nota:
+                chave = numeros(nota)
+                registros.setdefault(chave, {"nota": nota, "empresa": fornecedor, "destinos": []})
+                registros[chave]["empresa"] = fornecedor or registros[chave]["empresa"]
+
+        # Ao encontrar Destino, lê o nome e a quantidade alocada logo abaixo.
+        # Quantidade 0,00 é ignorada por completo.
+        if linha.lower().startswith("destino") and nota:
+            desc = linhas[i + 1] if i + 1 < len(linhas) else ""
+            desc = re.sub(r"^(Estoque:|Centro de Custo:)", "", desc, flags=re.I).strip()
+            qty = None
+            for j in range(i + 2, min(i + 5, len(linhas))):
+                # Quantidade costuma estar antes da unidade (CX, KG, SC etc.).
+                m = re.match(r"^(-?\d+[.,]\d+)\s*(?:[A-Za-z]{1,6})?$", linhas[j])
+                if m:
+                    qty = quantidade_pt(m.group(1))
+                    break
+            if qty is not None and qty > 0 and desc:
+                chave = numeros(nota)
+                registros.setdefault(chave, {"nota": nota, "empresa": fornecedor, "destinos": []})
+                entrada = f"{desc} — {qty:g}"
+                if entrada not in registros[chave]["destinos"]:
+                    registros[chave]["destinos"].append(entrada)
+                registros[chave]["empresa"] = fornecedor or registros[chave]["empresa"]
+        i += 1
+
+    return registros
+
+
+def encontrar(documento, registros):
+    alvo = numeros(documento)
+    if not alvo:
+        return None
+    candidatos = [r for chave, r in registros.items() if chave == alvo or chave.startswith(alvo)]
+    # Se o número na planilha for o número-base da nota, aceita correspondência por prefixo.
+    # Se houver mais de uma nota candidata, não escolhe arbitrariamente.
+    if len(candidatos) == 1:
+        return candidatos[0]
+    if len(candidatos) > 1:
+        exatos = [r for chave, r in registros.items() if chave == alvo]
+        return exatos[0] if len(exatos) == 1 else None
+    # Não usa correspondência parcial reversa para evitar associações incorretas.
+    return None
+
+
+def pdf_confirmados(resultados):
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    estilos = getSampleStyleSheet()
+    titulo = ParagraphStyle("Titulo", parent=estilos["Title"], fontSize=16, leading=20, alignment=1, spaceAfter=12)
+    normal = ParagraphStyle("NormalNovo", parent=estilos["Normal"], fontSize=9, leading=12)
+    story = [Paragraph("CONFERÊNCIA DE BAIXAS", titulo), Paragraph("Documentos confirmados na conferência", normal), Spacer(1, 12)]
+    dados = [["Documento", "Empresa / Fornecedor", "Destino(s) da baixa"]]
+    for r in resultados:
+        dest = "<br/>".join(r["destinos"]) if r["destinos"] else "Destino não identificado no PDF"
+        dados.append([Paragraph(str(r["documento"]), normal), Paragraph(r["empresa"] or "Não identificado", normal), Paragraph(dest, normal)])
+    tabela = Table(dados, colWidths=[75, 190, 245], repeatRows=1)
+    tabela.setStyle(TableStyle([
+        ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#D9E2F3")),
+        ("TEXTCOLOR", (0,0), (-1,0), colors.black),
+        ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"),
+        ("GRID", (0,0), (-1,-1), 0.5, colors.grey),
+        ("VALIGN", (0,0), (-1,-1), "TOP"),
+        ("LEFTPADDING", (0,0), (-1,-1), 6), ("RIGHTPADDING", (0,0), (-1,-1), 6),
+        ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6),
+    ]))
+    story.append(tabela)
+    doc.build(story)
+    buffer.seek(0)
+    return buffer
 
-st.set_page_config(
-    page_title="Conferência de Baixas",
-    page_icon="📋",
-    layout="wide"
-)
-
-st.title("📋 Conferência de Baixas")
-st.caption("Confronto de remessas Excel com relatórios PDF de baixas diretas.")
-
-# =========================================================
-# FUNÇÕES
-# =========================================================
-
-def normalizar(texto):
-    texto = str(texto).strip().lower()
-    texto = unicodedata.normalize("NFD", texto)
-    texto = "".join(c for c in texto if unicodedata.category(c) != "Mn")
-    return texto
-
-
-def somente_numeros(texto):
-    return re.sub(r"\D", "", str(texto))
-
-
-def ler_excel(arquivo):
-    wb = pd.ExcelFile(arquivo)
-
-    if "FILIAL" not in wb.sheet_names:
-        raise ValueError("A planilha não possui uma aba chamada FILIAL.")
-
-    df = pd.read_excel(arquivo, sheet_name="FILIAL", header=None)
-
-    documentos = []
-
-    # Lê a primeira coluna preservando a ordem
-    for valor in df.iloc[:, 0].tolist():
-
-        if pd.isna(valor):
-            continue
-
-        texto = str(valor).strip()
-
-        if texto.lower() in ["nan", "documento", "doc", "nota"]:
-            continue
-
-        if "total" in normalizar(texto):
-            continue
-
-        numero = somente_numeros(texto)
-
-        if not numero:
-            continue
-
-        documentos.append(texto)
-
-    return documentos
-
-
-def ler_pdf(arquivo):
-    pdf = fitz.open(stream=arquivo.read(), filetype="pdf")
-
-    texto_completo = ""
-
-    for pagina in pdf:
-        texto_completo += pagina.get_text() + "\n"
-
-    return texto_completo
-
-
-def localizar_documentos(texto_pdf, documento):
-    numero = somente_numeros(documento)
-
-    if not numero:
-        return []
-
-    linhas = texto_pdf.splitlines()
-    encontrados = []
-
-    for i, linha in enumerate(linhas):
-
-        numeros_linha = somente_numeros(linha)
-
-        if numero in numeros_linha and len(numeros_linha) <= len(numero) + 10:
-            contexto = "\n".join(linhas[max(0, i-2):min(len(linhas), i+5)])
-
-            if "confecções elite" in normalizar(contexto):
-                continue
-
-            encontrados.append(contexto)
-
-    return encontrados
-
-
-def buscar_numero_pdf(texto_pdf, documento):
-    numero = somente_numeros(documento)
-
-    if not numero:
-        return False
-
-    # Procura o número em linhas do relatório
-    for linha in texto_pdf.splitlines():
-
-        linha_num = somente_numeros(linha)
-
-        if numero == linha_num:
-            return True
-
-        # Considera documento com sufixo /001 ou /002
-        if linha_num.startswith(numero) and len(linha_num) <= len(numero) + 8:
-            return True
-
-    return False
-
-
-def encontrar_similares(texto_pdf, documento, limite=0.70):
-    numero = somente_numeros(documento)
-    candidatos = []
-
-    if not numero:
-        return candidatos
-
-    # Extrai números que aparecem no PDF
-    encontrados = re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", texto_pdf)
-
-    vistos = set()
-
-    for candidato in encontrados:
-
-        cand_num = somente_numeros(candidato)
-
-        if not cand_num or cand_num in vistos:
-            continue
-
-        vistos.add(cand_num)
-
-        similaridade = SequenceMatcher(
-            None,
-            numero,
-            cand_num
-        ).ratio()
-
-        if similaridade >= limite and cand_num != numero:
-            candidatos.append((candidato, similaridade))
-
-    candidatos.sort(key=lambda x: x[1], reverse=True)
-
-    return candidatos[:5]
-
-
-def obter_contexto(texto_pdf, documento):
-    linhas = texto_pdf.splitlines()
-    numero = somente_numeros(documento)
-    resultados = []
-
-    for i, linha in enumerate(linhas):
-
-        linha_num = somente_numeros(linha)
-
-        if numero and numero in linha_num and len(linha_num) <= len(numero) + 8:
-
-            trecho = linhas[max(0, i-2):min(len(linhas), i+8)]
-
-            resultados.append("\n".join(trecho))
-
-    return resultados
-
-
-# =========================================================
-# UPLOAD
-# =========================================================
 
 st.subheader("1. Envie os arquivos")
-
 col1, col2 = st.columns(2)
-
 with col1:
-    excel_file = st.file_uploader(
-        "Remessa Excel",
-        type=["xlsx", "xls"]
-    )
-
+    excel_file = st.file_uploader("Remessa Excel", type=["xlsx", "xls"])
 with col2:
-    pdf_file = st.file_uploader(
-        "Relatório diário PDF",
-        type=["pdf"]
-    )
-
-st.info(
-    "A primeira versão utiliza a aba FILIAL e a primeira coluna "
-    "da planilha para identificar os documentos."
-)
-
-# =========================================================
-# PROCESSAMENTO
-# =========================================================
+    pdf_file = st.file_uploader("Relatório diário PDF", type=["pdf"])
+st.info("A aba FILIAL da planilha define apenas a sequência dos documentos. Empresa e destino são extraídos do relatório PDF. Destinos com quantidade 0,00 são ignorados.")
 
 if excel_file and pdf_file:
-
     if st.button("🔎 CONFRONTAR DOCUMENTOS", type="primary", use_container_width=True):
-
         try:
-
-            documentos = ler_excel(excel_file)
-            texto_pdf = ler_pdf(pdf_file)
-
-            resultados = []
-
-            for documento in documentos:
-
-                correspondencias = localizar_documentos(
-                    texto_pdf,
-                    documento
-                )
-
-                if correspondencias:
-
-                    resultados.append({
-                        "documento": documento,
-                        "status": "Encontrado",
-                        "correspondencia": "Localizado no relatório",
-                        "destino": "Conferir contexto abaixo",
-                        "contexto": correspondencias
-                    })
-
-                else:
-
-                    similares = encontrar_similares(
-                        texto_pdf,
-                        documento
-                    )
-
-                    if similares:
-
-                        resultados.append({
-                            "documento": documento,
-                            "status": "Divergência possível",
-                            "correspondencia": similares,
-                            "destino": "Não confirmado",
-                            "contexto": []
-                        })
-
-                    else:
-
-                        resultados.append({
-                            "documento": documento,
-                            "status": "Compra para confirmar",
-                            "correspondencia": "Não localizado",
-                            "destino": "Confirmar origem",
-                            "contexto": []
-                        })
-
-            st.session_state["resultados"] = resultados
-            st.session_state["texto_pdf"] = texto_pdf
-
+            documentos = ler_remessa(excel_file)
+            registros = extrair_pdf(pdf_file)
+            st.session_state.resultados = []
+            for docnum in documentos:
+                registro = encontrar(docnum, registros)
+                st.session_state.resultados.append({
+                    "documento": docnum,
+                    "empresa": registro["empresa"] if registro else "Não encontrado no PDF",
+                    "destinos": registro["destinos"][:] if registro else [],
+                    "confirmado": False,
+                    "encontrado": bool(registro)
+                })
         except Exception as e:
-            st.error(f"Erro ao processar os arquivos: {e}")
+            st.error(f"Erro ao processar arquivos: {e}")
 
-
-# =========================================================
-# RESULTADOS
-# =========================================================
-
-if "resultados" in st.session_state:
-
-    resultados = st.session_state["resultados"]
-
-    st.divider()
-    st.subheader("2. Conferência dos documentos")
-
-    st.caption(
-        "A ordem abaixo segue a ordem da remessa Excel. "
-        "Use os controles para confirmar ou sinalizar correções."
-    )
-
-    for i, resultado in enumerate(resultados):
-
-        documento = resultado["documento"]
-
+if "resultados" in st.session_state and st.session_state.resultados:
+    st.subheader("2. Conferência (ordem da planilha)")
+    for i, r in enumerate(st.session_state.resultados):
         with st.container(border=True):
-
-            st.markdown(f"### {i+1}. Documento {documento}")
-
-            status = resultado["status"]
-
-            if status == "Encontrado":
-
-                st.success("Documento localizado no relatório")
-
-                st.write("**Correspondência:**", resultado["correspondencia"])
-
-                contextos = resultado["contexto"]
-
-                if contextos:
-
-                    st.markdown("**Destino / trecho da baixa no relatório:**")
-
-                    for contexto in contextos:
-                        st.text(contexto)
-
-            elif status == "Divergência possível":
-
-                st.warning("Possível divergência de numeração")
-
-                st.write("**Número da remessa:**", documento)
-
-                st.write("**Possíveis correspondências:**")
-
-                for candidato, percentual in resultado["correspondencia"]:
-
-                    st.write(
-                        f"- {candidato} — "
-                        f"{percentual*100:.1f}% de semelhança"
-                    )
-
-                st.error(
-                    "A semelhança NÃO confirma que seja o mesmo documento."
-                )
-
+            st.markdown(f"**Documento: {r['documento']}**")
+            st.markdown(f"**Empresa:** {r['empresa']}")
+            if r["destinos"]:
+                st.markdown("**Baixado para:**")
+                for destino in r["destinos"]:
+                    st.write(f"- {destino}")
             else:
+                st.warning("Destino não localizado com quantidade positiva no PDF. Verifique manualmente.")
+            r["confirmado"] = st.checkbox("Confirmar", key=f"confirmar_{i}")
 
-                st.warning("Compra para confirmar")
-
-                st.write(
-                    "Documento não localizado no relatório PDF enviado."
-                )
-
-            # Único controle individual: checkbox de confirmação
-            chave = f"conferencia_{i}"
-
-            st.checkbox(
-                "Confirmar",
-                key=chave
-            )
-
-# =========================================================
-# RESUMO
-# =========================================================
-
-if "resultados" in st.session_state:
-
-    st.divider()
-    st.subheader("3. Resumo")
-
-    resultados = st.session_state["resultados"]
-
-    total = len(resultados)
-    confirmados = sum(
-        bool(st.session_state.get(f"conferencia_{i}", False))
-        for i in range(total)
-    )
-
-    st.metric("Confirmados", confirmados)
-    st.metric("Ainda não confirmados", total - confirmados)
-
-    # =====================================================
-    # EXPORTAÇÃO DO RESUMO
-    # =====================================================
-
-    linhas_resumo = []
-
-    for i, resultado in enumerate(resultados):
-
-        linhas_resumo.append({
-            "Ordem": i+1,
-            "Documento": resultado["documento"],
-            "Status automático": resultado["status"],
-            "Confirmado": "SIM" if st.session_state.get(f"conferencia_{i}", False) else "NÃO"
-        })
-
-    df_resultado = pd.DataFrame(linhas_resumo)
-
-    st.subheader("4. Resultado final")
-
-    st.dataframe(
-        df_resultado,
-        use_container_width=True,
-        hide_index=True
-    )
-
-    csv = df_resultado.to_csv(
-        index=False,
-        sep=";",
-        encoding="utf-8-sig"
-    )
-
-    st.download_button(
-        "📥 Baixar resultado CSV",
-        data=csv,
-        file_name="conferencia_baixas.csv",
-        mime="text/csv",
-        use_container_width=True
-    )
-
-    texto_copia = "\n".join(
-        [
-            f"{linha['Ordem']}. Documento {linha['Documento']} | "
-            f"{linha['Status automático']} | "
-            f"Confirmado: {linha['Confirmado']}"
-            for linha in linhas_resumo
-        ]
-    )
-
-    st.text_area(
-        "Resumo para copiar",
-        texto_copia,
-        height=250
-    )
-
-# =========================================================
-# RODAPÉ
-# =========================================================
-
-st.divider()
-
-st.caption(
-    "Conferência de Baixas | Ferramenta de apoio. "
-    "A confirmação final deve ser realizada pelo responsável."
-)
+    confirmados = [r for r in st.session_state.resultados if r["confirmado"]]
+    st.metric("Documentos confirmados", len(confirmados))
+    if confirmados:
+        pdf_saida = pdf_confirmados(confirmados)
+        st.download_button("📄 Baixar resumo em PDF (somente confirmados)", data=pdf_saida, file_name="conferencia_baixas_confirmadas.pdf", mime="application/pdf", use_container_width=True)
+    else:
+        st.caption("Marque os documentos conferidos para habilitar o PDF final.")
