@@ -1,3 +1,67 @@
+import streamlit as st
+import pandas as pd
+import fitz
+import re
+import unicodedata
+from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+
+st.set_page_config(page_title="Conferência de Baixas", page_icon="📋", layout="wide")
+st.title("📋 Conferência de Baixas")
+st.caption("Confronto de remessas Excel com relatórios PDF de baixas diretas.")
+
+
+def normalizar(txt):
+    txt = str(txt).strip().lower()
+    txt = unicodedata.normalize("NFD", txt)
+    return "".join(c for c in txt if unicodedata.category(c) != "Mn")
+
+
+def numeros(txt):
+    return re.sub(r"\D", "", str(txt))
+
+
+def ler_remessa(arquivo):
+    df = pd.read_excel(arquivo, sheet_name="FILIAL", header=None)
+    docs = []
+    for v in df.iloc[:, 0].tolist():
+        if pd.isna(v):
+            continue
+        s = str(v).strip()
+        if normalizar(s) in ("n° do doc.", "n do doc.", "documento", "doc", "nota") or "total" in normalizar(s):
+            continue
+        n = numeros(s)
+        if n:
+            docs.append(s)
+    return docs
+
+
+def quantidade_pt(txt):
+    """Converte valor numérico em formato brasileiro (ex.: 0,00) para float."""
+    txt = str(txt).strip().replace(".", "").replace(",", ".")
+    try:
+        return float(txt)
+    except ValueError:
+        return None
+
+
+def extrair_pdf(arquivo):
+    pdf = fitz.open(stream=arquivo.read(), filetype="pdf")
+    linhas = [l.strip() for pg in pdf for l in pg.get_text().splitlines() if l.strip()]
+    registros = {}
+    fornecedor = ""
+    nota = ""
+
+    i = 0
+    while i < len(linhas):
+        linha = linhas[i]
+
+        if linha.startswith("Fornecedor :") or "Fornecedor :" in linha:
+            parte = linha.split("Fornecedor :", 1)[1].strip()
+            fornecedor = re.split(r"\s+Vencimento\s*:", parte, flags=re.I)[0].strip()
 
         if "Nº da Nota" in linha or "N° da Nota" in linha:
             candidatos = re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", linha)
