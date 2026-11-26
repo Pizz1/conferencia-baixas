@@ -50,44 +50,61 @@ def quantidade_pt(txt):
 
 def extrair_pdf(arquivo):
     pdf = fitz.open(stream=arquivo.read(), filetype="pdf")
-    linhas = [l.strip() for pg in pdf for l in pg.get_text().splitlines() if l.strip()]
     registros = {}
-    fornecedor = ""
-    nota = ""
-    i = 0
-    while i < len(linhas):
-        linha = linhas[i]
-        if "Fornecedor :" in linha:
-            parte = linha.split("Fornecedor :", 1)[1].strip()
-            fornecedor = re.split(r"\s+Vencimento\s*:", parte, flags=re.I)[0].strip()
-        if "Nº da Nota" in linha or "N° da Nota" in linha or "No da Nota" in linha:
-            candidatos = re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", linha)
-            if i + 1 < len(linhas):
-                candidatos += re.findall(r"\b\d{3,}(?:/\d{1,3})?\b", linhas[i + 1])
-            com_barra = [c for c in candidatos if "/" in c]
-            nota = com_barra[0] if com_barra else (candidatos[0] if candidatos else "")
-            if nota:
-                chave = numeros(nota)
-                registros.setdefault(chave, {"nota": nota, "empresa": fornecedor, "destinos": []})
-                registros[chave]["empresa"] = fornecedor or registros[chave]["empresa"]
-        if linha.lower().startswith("destino") and nota:
-            desc = linhas[i + 1] if i + 1 < len(linhas) else ""
-            desc = re.sub(r"^(Estoque:|Centro de Custo:)", "", desc, flags=re.I).strip()
-            qty = None
-            for j in range(i + 2, min(i + 6, len(linhas))):
-                m = re.match(r"^(-?\d+[.,]\d+)\s*(?:[A-Za-z]{1,6})?$", linhas[j])
-                if m:
-                    qty = quantidade_pt(m.group(1))
-                    break
-            # Regra: zero e negativos não são destinos efetivos.
-            if qty is not None and qty > 0 and desc:
-                chave = numeros(nota)
-                registros.setdefault(chave, {"nota": nota, "empresa": fornecedor, "destinos": []})
-                entrada = f"{desc} — {qty:g}"
-                if entrada not in registros[chave]["destinos"]:
-                    registros[chave]["destinos"].append(entrada)
-                registros[chave]["empresa"] = fornecedor or registros[chave]["empresa"]
-        i += 1
+
+    # Lê cada página em sequência, associando explicitamente fornecedor e nota.
+    for pagina in pdf:
+        linhas = [l.strip() for l in pagina.get_text().splitlines() if l.strip()]
+        fornecedor_atual = ""
+        nota_atual = ""
+        chave_atual = ""
+
+        i = 0
+        while i < len(linhas):
+            linha = linhas[i]
+
+            # Cada cabeçalho de fornecedor atualiza o contexto da nota.
+            m_for = re.search(r"Fornecedor\\s*:\\s*(.*?)(?=\\s+Vencimento\\s*:|$)", linha, re.I)
+            if m_for:
+                fornecedor_atual = m_for.group(1).strip()
+
+            # Número pode aparecer na mesma linha do rótulo ou nas linhas seguintes.
+            if re.search(r"N[º°o]\\s*da\\s*Nota\\s*:", linha, re.I):
+                bloco = " ".join(linhas[i:i+3])
+                m_nota = re.search(r"N[º°o]\\s*da\\s*Nota\\s*:\\s*(?:\\s*)?(\\d{3,}(?:/\\d{1,3})?)", bloco, re.I)
+                if not m_nota:
+                    m_nota = re.search(r"(\\d{3,}/\\d{1,3})", bloco)
+                if m_nota:
+                    nota_atual = m_nota.group(1)
+                    chave_atual = numeros(nota_atual)
+                    registros.setdefault(chave_atual, {
+                        "nota": nota_atual, "empresa": fornecedor_atual, "destinos": []
+                    })
+                    # Atualiza fornecedor mesmo se o registro já tiver sido criado.
+                    registros[chave_atual]["empresa"] = fornecedor_atual
+
+            # Uma linha de Destino é seguida pelo nome e depois pela quantidade.
+            if linha.lower() == "destino" and chave_atual:
+                desc = ""
+                qty = None
+                if i + 1 < len(linhas):
+                    desc = re.sub(r"^(Estoque:|Centro de Custo:)\\s*", "", linhas[i+1], flags=re.I).strip()
+
+                # A quantidade de destino costuma estar na linha seguinte ao nome,
+                # antes da unidade (CX, KG etc.). Procura somente dentro de 3 linhas.
+                for j in range(i + 2, min(i + 5, len(linhas))):
+                    m_qty = re.match(r"^(-?\\d+[.,]\\d+)\\s*(?:[A-Za-z]{1,6})?$", linhas[j])
+                    if m_qty:
+                        qty = quantidade_pt(m_qty.group(1))
+                        break
+
+                if qty is not None and qty > 0 and desc:
+                    entrada = f"{desc} — {qty:g}"
+                    if entrada not in registros[chave_atual]["destinos"]:
+                        registros[chave_atual]["destinos"].append(entrada)
+
+            i += 1
+
     return registros
 
 
