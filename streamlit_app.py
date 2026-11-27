@@ -136,20 +136,36 @@ def card_html(row, confirmed):
       <div style='font-weight:700;font-size:1.05rem;color:{'#166534' if confirmed else '#111827'}'>{"✓ " if confirmed else ""}Documento: {row['documento']} <span style='font-weight:400;font-size:.9rem'>| Nota: {row.get('note','')}</span></div>
       <div style='font-size:.88rem;margin:4px 0'><b>Fornecedor:</b> {row.get('vendor','')}</div></div>"""
 
-excel_col,pdf_col=st.columns(2)
-with excel_col: xfile=st.file_uploader("Planilha Excel",type=["xlsx","xls"])
-with pdf_col: pfile=st.file_uploader("Relatório PDF",type=["pdf"])
-st.caption("O cartão apresenta os dados do documento e seus destinos. Destinos com quantidade 0,00 são ignorados.")
+docs_input_col,pdf_col=st.columns(2)
+with docs_input_col:
+    docs_text=st.text_area("Números dos documentos",placeholder="Digite ou cole um documento por linha.\nTambém aceitamos números separados por vírgula ou ponto e vírgula.",height=180)
+with pdf_col:
+    pfile=st.file_uploader("Relatório de baixas PDF",type=["pdf"])
 
-if xfile and pfile and st.button("🔎 CONFERIR DOCUMENTOS",type="primary",use_container_width=True):
+st.caption("Informe somente os documentos desejados. O aplicativo mantém a ordem digitada e ignora destinos com quantidade 0,00.")
+
+def parse_input_docs(text):
+    if not text: return []
+    # aceitar linha, vírgula, ponto e vírgula ou espaço, mas preservar numeração com /xxx
+    raw=re.split(r"[\n,;]+",text)
+    seen=set(); result=[]
+    for item in raw:
+        item=item.strip()
+        if not item: continue
+        key=norm_num(item)
+        if not key or key in seen: continue
+        seen.add(key); result.append(item)
+    return result
+
+if pfile and docs_text.strip() and st.button("🔎 CONFERIR DOCUMENTOS",type="primary",use_container_width=True):
     try:
-        docs=read_excel(xfile)
+        docs=parse_input_docs(docs_text)
         invoices=parse_report(pfile)
         result=[]
         for d in docs:
             m=match_doc(d,invoices)
             if isinstance(m,list):
-                inv=None # ambiguous match; don't auto-pick
+                inv=None
                 status="ambiguous"
             else:
                 inv=m
