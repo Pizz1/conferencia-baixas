@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import fitz
 import re
-import unicodedata
 from io import BytesIO
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
@@ -11,219 +10,163 @@ from reportlab.lib import colors
 
 st.set_page_config(page_title="Conferência de Baixas", page_icon="📋", layout="wide")
 st.title("📋 Conferência de Baixas")
-st.caption("Confronto da sequência Excel com o relatório PDF de baixas diretas.")
+st.caption("Confira somente o destino das baixas, na sequência dos documentos da planilha.")
 
+def digits(s):
+    return re.sub(r"\D", "", str(s))
 
-def normalizar(txt):
-    txt = unicodedata.normalize("NFD", str(txt).strip().lower())
-    return "".join(c for c in txt if unicodedata.category(c) != "Mn")
+def clean(s):
+    return str(s).strip()
 
-
-def numeros(txt):
-    return re.sub(r"\D", "", str(txt))
-
-
-def ler_remessa(arquivo):
-    df = pd.read_excel(arquivo, sheet_name="FILIAL", header=None)
-    # Modelo simplificado: número do documento na coluna B. Também aceita
-    # arquivos antigos com números na coluna A, caso a coluna B esteja vazia.
-    coluna = 1 if df.shape[1] > 1 and df.iloc[:, 1].notna().any() else 0
-    docs = []
-    for v in df.iloc[:, coluna].tolist():
-        if pd.isna(v):
-            continue
-        s = str(v).strip()
-        n = numeros(s)
-        if not n or normalizar(s) in ("documento", "numero do documento", "n° do doc.", "n do doc.", "doc", "nota"):
-            continue
-        docs.append(s)
+def read_excel(upload):
+    df = pd.read_excel(upload, sheet_name="FILIAL", header=None, dtype=str)
+    # Modelo: coluna B (index 1). Compatibilidade com planilhas com números na coluna A.
+    col = 1 if df.shape[1] > 1 and df.iloc[:,1].notna().any() else 0
+    docs=[]
+    for value in df.iloc[:,col].tolist():
+        if pd.isna(value): continue
+        value=clean(value)
+        if not digits(value): continue
+        if value.lower() in ("numero do documento","número do documento","documento","sequência","sequencia"): continue
+        docs.append(value)
     return docs
 
+def parse_pt_num(s):
+    s=str(s).strip().replace(".","").replace(",",".")
+    try: return float(s)
+    except: return None
 
-def quantidade_pt(txt):
-    txt = str(txt).strip().replace(".", "").replace(",", ".")
+def parse_pdf(upload):
+    pdf=fitz.open(stream=upload.read(),filetype="pdf")
+    lines=[]
+    for page in pdf:
+        lines.extend([clean(x) for x in page.get_text().splitlines() if clean(x)])
+    records=[]
+    records_by_note={}
+    current=None
+    i=0
+    # A linha do campo Nº da Nota é seguida, em geral, pela linha com o número/valor.
+    while i<len(lines):
+        line=lines[i]
+        if re.search(r"N[º°o]\s*da\s*Nota\s*:", line, re.I) or line.strip().lower()=="nº da nota :":
+            candidate=""
+            # Procura nas linhas imediatamente seguintes pelo número da nota (com sufixo /xxx)
+            for j in range(i+1,min(i+5,len(lines))):
+                m=re.search(r"\b(\d{2,}(?:/\d{1,4})?)\b",lines[j])
+                if m:
+                    candidate=m.group(1); break
+            if candidate:
+                current=records_by_note.setdefault(candidate,{"nota":candidate,"destinos":[]})
+                if current not in records: records.append(current)
+        # algumas extrações trazem o campo e o valor na mesma linha
+        m_inline=re.search(r"N[º°o]\s*da\s*Nota\s*:\s*(\d{2,}(?:/\d{1,4})?)",line,re.I)
+        if m_inline:
+            current=records_by_note.setdefault(m_inline.group(1),{"nota":m_inline.group(1),"destinos":[]})
+            if current not in records: records.append(current)
+        if line.lower()=="destino" and current:
+            destline=lines[i+1] if i+1<len(lines) else ""
+            destline=re.sub(r"^(Estoque:|Centro de Custo:)\s*","",destline,flags=re.I).strip()
+            qty=None
+            # O número da alocação aparece logo após a descrição do destino,
+            # normalmente antes da unidade (KG, CX, UN etc.).
+            for j in range(i+2,min(i+5,len(lines))):
+                m=re.match(r"^\s*(-?\d[\d.,]*)\s*(?:[A-Za-z]{1,8})?\s*$",lines[j])
+                if m:
+                    qty=parse_pt_num(m.group(1)); break
+            if destline and qty is not None and qty>0:
+                entry=f"{destline} — {qty:g}"
+                if entry not in current["destinos"]:
+                    current["destinos"].append(entry)
+        i+=1
+    return records
+
+def match_doc(doc, records):
+    # Excel pode conter 16789, enquanto PDF contém 16789/001.
+    # Comparar o número-base (parte antes da barra) de forma exata.
+    target=digits(str(doc).split("/",1)[0])
+    matches=[]
+    for r in records:
+        base=digits(r["nota"].split("/",1)[0])
+        if target and base==target:
+            matches.append(r)
+    # Se houver mais de uma nota com o mesmo número-base, não escolher silenciosamente.
+    return matches[0] if len(matches)==1 else None
+
+def make_pdf(rows):
+    buf=BytesIO()
+    pdf=SimpleDocTemplate(buf,pagesize=A4,rightMargin=36,leftMargin=36,topMargin=36,bottomMargin=36)
+    styles=getSampleStyleSheet()
+    body=ParagraphStyle("body",parent=styles["Normal"],fontSize=10,leading=14)
+    title=ParagraphStyle("title2",parent=styles["Title"],fontSize=16,leading=20,alignment=1)
+    story=[Paragraph("CONFERÊNCIA DE BAIXAS",title),Spacer(1,12)]
+    data=[["Documento","Destino(s) da baixa"]]
+    for r in rows:
+        d="<br/>".join(r["destinos"]) if r["destinos"] else "Destino não identificado"
+        data.append([Paragraph(str(r["documento"]),body),Paragraph(d,body)])
+    table=Table(data,colWidths=[100,410],repeatRows=1)
+    table.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#D9E2F3")),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("GRID",(0,0),(-1,-1),0.5,colors.grey),("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),6),("RIGHTPADDING",(0,0),(-1,-1),6),
+        ("TOPPADDING",(0,0),(-1,-1),6),("BOTTOMPADDING",(0,0),(-1,-1),6)
+    ]))
+    story.append(table); pdf.build(story); buf.seek(0)
+    return buf
+
+excel_col,pdf_col=st.columns(2)
+with excel_col: xfile=st.file_uploader("Planilha Excel",type=["xlsx","xls"])
+with pdf_col: pfile=st.file_uploader("Relatório de baixas PDF",type=["pdf"])
+st.info("O aplicativo segue a sequência do Excel. Busca o número-base da nota no PDF, exibe apenas destinos com quantidade positiva e não mostra fornecedor.")
+
+if xfile and pfile and st.button("🔎 CONFRONTAR",type="primary",use_container_width=True):
     try:
-        return float(txt)
-    except ValueError:
-        return None
+        docs=read_excel(xfile)
+        records=parse_pdf(pfile)
+        rows=[]
+        for docnum in docs:
+            reg=match_doc(docnum,records)
+            rows.append({"documento":docnum,"destinos":reg["destinos"][:] if reg else [],
+                         "encontrado":bool(reg),"confirmado":bool(reg and reg["destinos"])})
+        st.session_state["rows"]=rows
+    except Exception as e:
+        st.error(f"Erro na leitura dos arquivos: {e}")
 
-
-def extrair_pdf(arquivo):
-    pdf = fitz.open(stream=arquivo.read(), filetype="pdf")
-    registros = {}
-
-    # Lê cada página em sequência, associando explicitamente fornecedor e nota.
-    for pagina in pdf:
-        linhas = [l.strip() for l in pagina.get_text().splitlines() if l.strip()]
-        fornecedor_atual = ""
-        nota_atual = ""
-        chave_atual = ""
-
-        i = 0
-        while i < len(linhas):
-            linha = linhas[i]
-
-            # Cada cabeçalho de fornecedor atualiza o contexto da nota.
-            m_for = re.search(r"Fornecedor\s*:\s*(.*?)(?=\s+Vencimento\s*:|$)", linha, re.I)
-            if m_for:
-                fornecedor_atual = m_for.group(1).strip()
-
-            # Número pode aparecer na mesma linha do rótulo ou nas linhas seguintes.
-            if re.search(r"N[º°o]\s*da\s*Nota\s*:", linha, re.I):
-                bloco = " ".join(linhas[i:i+3])
-                m_nota = re.search(r"N[º°o]\s*da\s*Nota\s*:\s*(?:\s*)?(\d{3,}(?:/\d{1,3})?)", bloco, re.I)
-                if not m_nota:
-                    m_nota = re.search(r"(\d{3,}/\d{1,3})", bloco)
-                if m_nota:
-                    nota_atual = m_nota.group(1)
-                    chave_atual = numeros(nota_atual)
-                    registros.setdefault(chave_atual, {
-                        "nota": nota_atual, "empresa": fornecedor_atual, "destinos": []
-                    })
-                    # Atualiza fornecedor mesmo se o registro já tiver sido criado.
-                    registros[chave_atual]["empresa"] = fornecedor_atual
-
-            # Uma linha de Destino é seguida pelo nome e depois pela quantidade.
-            if linha.lower() == "destino" and chave_atual:
-                desc = ""
-                qty = None
-                if i + 1 < len(linhas):
-                    desc = re.sub(r"^(Estoque:|Centro de Custo:)\s*", "", linhas[i+1], flags=re.I).strip()
-
-                # A quantidade de destino costuma estar na linha seguinte ao nome,
-                # antes da unidade (CX, KG etc.). Procura somente dentro de 3 linhas.
-                for j in range(i + 2, min(i + 5, len(linhas))):
-                    m_qty = re.match(r"^(-?\d+[.,]\d+)\s*(?:[A-Za-z]{1,6})?$", linhas[j])
-                    if m_qty:
-                        qty = quantidade_pt(m_qty.group(1))
-                        break
-
-                if qty is not None and qty > 0 and desc:
-                    entrada = f"{desc} — {qty:g}"
-                    if entrada not in registros[chave_atual]["destinos"]:
-                        registros[chave_atual]["destinos"].append(entrada)
-
-            i += 1
-
-    return registros
-
-
-def encontrar(documento, registros):
-    alvo = numeros(documento)
-    if not alvo:
-        return None
-    # Correspondência exata. Sem prefixos/parciais para evitar associações indevidas.
-    candidatos = [r for chave, r in registros.items() if chave == alvo]
-    return candidatos[0] if len(candidatos) == 1 else None
-
-
-def pdf_confirmados(resultados):
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    estilos = getSampleStyleSheet()
-    titulo = ParagraphStyle("Titulo", parent=estilos["Title"], fontSize=16, leading=20, alignment=1, spaceAfter=12)
-    normal = ParagraphStyle("NormalNovo", parent=estilos["Normal"], fontSize=9, leading=12)
-    story = [Paragraph("CONFERÊNCIA DE BAIXAS", titulo), Paragraph("Documentos confirmados", normal), Spacer(1, 12)]
-    dados = [["Documento", "Empresa / Fornecedor", "Destino(s) da baixa"]]
-    for r in resultados:
-        dest = "<br/>".join(r["destinos"]) if r["destinos"] else "Destino não identificado"
-        dados.append([Paragraph(str(r["documento"]), normal), Paragraph(r["empresa"] or "Não identificado", normal), Paragraph(dest, normal)])
-    tabela = Table(dados, colWidths=[75, 190, 245], repeatRows=1)
-    tabela.setStyle(TableStyle([("BACKGROUND", (0,0), (-1,0), colors.HexColor("#D9E2F3")), ("FONTNAME", (0,0), (-1,0), "Helvetica-Bold"), ("GRID", (0,0), (-1,-1), 0.5, colors.grey), ("VALIGN", (0,0), (-1,-1), "TOP"), ("LEFTPADDING", (0,0), (-1,-1), 6), ("RIGHTPADDING", (0,0), (-1,-1), 6), ("TOPPADDING", (0,0), (-1,-1), 6), ("BOTTOMPADDING", (0,0), (-1,-1), 6)]))
-    story.append(tabela)
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
-
-
-col1, col2 = st.columns(2)
-with col1:
-    excel_file = st.file_uploader("Remessa Excel", type=["xlsx", "xls"])
-with col2:
-    pdf_file = st.file_uploader("Relatório diário PDF", type=["pdf"])
-st.info("Use o modelo simplificado: número do documento na coluna B. O PDF é a fonte de fornecedor e destinos. Destinos com quantidade 0,00 são ignorados.")
-
-if excel_file and pdf_file:
-    if st.button("🔎 CONFRONTAR DOCUMENTOS", type="primary", use_container_width=True):
-        try:
-            documentos = ler_remessa(excel_file)
-            registros = extrair_pdf(pdf_file)
-            resultados = []
-            for idx, docnum in enumerate(documentos):
-                registro = encontrar(docnum, registros)
-                resultados.append({"documento": docnum, "empresa": registro["empresa"] if registro else "Não encontrado no PDF", "destinos": registro["destinos"][:] if registro else [], "encontrado": bool(registro), "confirmado": bool(registro)})
-            st.session_state.resultados = resultados
-            st.session_state.registros_pdf = registros
-            st.session_state.manual_map = {}
-            for i, r in enumerate(resultados):
-                st.session_state[f"confirmar_{i}"] = bool(r["encontrado"])
-        except Exception as e:
-            st.error(f"Erro ao processar arquivos: {e}")
-
-if st.session_state.get("resultados"):
-    resultados = st.session_state.resultados
-    registros_pdf = st.session_state.get("registros_pdf", {})
-    encontrados = sum(1 for r in resultados if r["encontrado"])
-    confirmados_atual = sum(bool(st.session_state.get(f"confirmar_{i}", r.get("confirmado", False))) for i, r in enumerate(resultados))
-    pendentes = len(resultados) - confirmados_atual
-    problemas = sum(1 for r in resultados if not r["encontrado"] or not r["destinos"])
-
-    st.subheader("Resumo da conferência")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total de documentos", len(resultados))
-    m2.metric("Encontrados", encontrados)
-    m3.metric("Confirmados", confirmados_atual)
-    m4.metric("Pendentes", pendentes)
-    if problemas:
-        st.warning(f"{problemas} documento(s) precisam de atenção: não encontrados ou sem destino positivo.")
-    else:
-        st.success("Todos os documentos foram encontrados com destino positivo.")
-
-    b1, b2 = st.columns(2)
-    with b1:
-        if st.button("✅ Confirmar encontrados", use_container_width=True):
-            for i, r in enumerate(resultados):
-                if r["encontrado"] and r["destinos"]:
-                    st.session_state[f"confirmar_{i}"] = True
+if st.session_state.get("rows"):
+    rows=st.session_state["rows"]
+    total=len(rows); found=sum(r["encontrado"] for r in rows)
+    confirmed=sum(bool(st.session_state.get(f"confirm_{i}",r["confirmado"])) for i,r in enumerate(rows))
+    pending=total-confirmed
+    issues=sum(not r["encontrado"] or not r["destinos"] for r in rows)
+    st.subheader("Progresso")
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Total",total); c2.metric("Encontrados",found); c3.metric("Confirmados",confirmed); c4.metric("Pendentes",pending)
+    if issues: st.warning(f"{issues} documento(s) não encontrados ou sem destino positivo.")
+    left,right=st.columns(2)
+    with left:
+        if st.button("✅ Confirmar encontrados",use_container_width=True):
+            for i,r in enumerate(rows): st.session_state[f"confirm_{i}"]=bool(r["encontrado"] and r["destinos"])
             st.rerun()
-    with b2:
-        if st.button("☑️ Desmarcar todos", use_container_width=True):
-            for i in range(len(resultados)):
-                st.session_state[f"confirmar_{i}"] = False
+    with right:
+        if st.button("☑️ Desmarcar todos",use_container_width=True):
+            for i in range(total): st.session_state[f"confirm_{i}"]=False
             st.rerun()
-
-    st.subheader("Conferência na ordem da planilha")
-    for i, r in enumerate(resultados):
+    st.subheader("Conferência — ordem da planilha")
+    for i,r in enumerate(rows):
         with st.container(border=True):
             st.markdown(f"**Documento: {r['documento']}**")
-            st.markdown(f"**Empresa:** {r['empresa']}")
             if r["destinos"]:
                 st.markdown("**Baixado para:**")
-                for destino in r["destinos"]:
-                    st.write(f"- {destino}")
+                for d in r["destinos"]: st.write(f"- {d}")
+            elif not r["encontrado"]:
+                st.warning("Documento não localizado automaticamente no PDF.")
             else:
-                st.warning("Destino não localizado com quantidade positiva. Verifique manualmente.")
-            # Se não houve correspondência exata, permitir seleção manual de nota do PDF.
-            if not r["encontrado"] and registros_pdf:
-                opcoes = ["— Selecione uma nota do PDF —"] + [f"{v['nota']} | {v['empresa']}" for v in registros_pdf.values()]
-                escolha = st.selectbox("Vincular manualmente a uma nota", opcoes, key=f"manual_{i}")
-                if escolha != opcoes[0]:
-                    nota_escolhida = escolha.split(" | ", 1)[0]
-                    reg_escolhido = next((v for v in registros_pdf.values() if v["nota"] == nota_escolhida), None)
-                    if reg_escolhido:
-                        r["empresa"] = reg_escolhido["empresa"]
-                        r["destinos"] = reg_escolhido["destinos"][:]
-                        r["encontrado"] = True
-                        r["manual"] = True
-                        st.session_state.resultados[i] = r
-                        st.success("Vínculo manual aplicado. Confirme o documento para incluí-lo no PDF final.")
-            r["confirmado"] = st.checkbox("Confirmar", key=f"confirmar_{i}")
-            st.session_state.resultados[i] = r
-
-    confirmados = [r for i, r in enumerate(st.session_state.resultados) if st.session_state.get(f"confirmar_{i}", False)]
-    st.metric("Documentos selecionados para o PDF", len(confirmados))
-    if confirmados:
-        pdf_saida = pdf_confirmados(confirmados)
-        st.download_button("📄 Baixar PDF dos confirmados", data=pdf_saida, file_name="conferencia_baixas_confirmadas.pdf", mime="application/pdf", use_container_width=True)
-    else:
-        st.caption("Marque os documentos conferidos para habilitar o PDF final.")
+                st.warning("Documento encontrado, mas não há destino com quantidade positiva.")
+            st.checkbox("Confirmar",key=f"confirm_{i}",value=bool(st.session_state.get(f"confirm_{i}",r["confirmado"])))
+    selected=[]
+    for i,r in enumerate(rows):
+        if st.session_state.get(f"confirm_{i}",False):
+            selected.append(r)
+    if selected:
+        st.download_button("📄 Baixar PDF dos confirmados",data=make_pdf(selected),
+                          file_name="conferencia_baixas_confirmadas.pdf",mime="application/pdf",use_container_width=True)
