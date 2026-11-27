@@ -173,10 +173,10 @@ if pfile and docs_text.strip() and st.button("🔎 CONFERIR DOCUMENTOS",type="pr
             items=inv["items"] if inv else []
             result.append({"documento":d,"note":inv["note"] if inv else "", "vendor":inv["vendor"] if inv else "",
                            "items":items, "encontrado":bool(inv), "status":status,
-                           "confirmed":bool(inv and any(it["destinations"] for it in items))})
+                           "confirmed":False})
         st.session_state["records"]=result
         for idx,r in enumerate(result):
-            st.session_state[f"confirm_{idx}"]=r["confirmed"]
+            st.session_state[f"confirm_{idx}"]=False
     except Exception as e:
         st.error(f"Erro ao ler os arquivos: {e}")
 
